@@ -1,0 +1,17 @@
+{
+  "name": "antiraid-bot",
+  "version": "1.0.0",
+  "description": "Bot Discord anti-raid / anti-nuke avec panel Components V2",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "dotenv": "^16.4.5"
+  }
+}
