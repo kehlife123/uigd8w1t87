@@ -11,6 +11,7 @@ const {
   ModalBuilder,
   PermissionFlagsBits,
   RoleSelectMenuBuilder,
+  SectionBuilder,
   SeparatorBuilder,
   SeparatorSpacingSize,
   StringSelectMenuBuilder,
@@ -22,34 +23,67 @@ const {
 
 const store = require('./store');
 const protection = require('./protection');
+const backup = require('./backup');
 const { quarantineMember, releaseMember } = require('./quarantine');
 const { sendLog, clip } = require('./logger');
 const { COLORS, ID_RE, MODULES, getOwnerId } = require('./constants');
 
 /* -------------------------------------------------------------------------- */
-/*  Helpers de construction                                                   */
+/*  Briques de construction (Components V2)                                   */
 /* -------------------------------------------------------------------------- */
 
 const text = (content) => new TextDisplayBuilder().setContent(content);
-const divider = () => new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small);
+const rule = () => new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small);
+const gap = () => new SeparatorBuilder().setDivider(false).setSpacing(SeparatorSpacingSize.Small);
 const row = (...components) => new ActionRowBuilder().addComponents(...components);
-const button = (id, label, style = ButtonStyle.Secondary) =>
-  new ButtonBuilder().setCustomId(id).setLabel(label).setStyle(style);
-const toggle = (id, label, on) => button(id, `${label} · ${on ? 'ON' : 'OFF'}`, on ? ButtonStyle.Success : ButtonStyle.Secondary);
+
+const button = (id, label, { danger = false, disabled = false } = {}) =>
+  new ButtonBuilder()
+    .setCustomId(id)
+    .setLabel(label)
+    .setStyle(danger ? ButtonStyle.Danger : ButtonStyle.Secondary)
+    .setDisabled(disabled);
+
+/** Une ligne de réglage : libellé + état discret à gauche, action à droite. */
+const line = (title, detail, accessory) =>
+  new SectionBuilder()
+    .addTextDisplayComponents(text(detail ? `${title}\n-# ${detail}` : title))
+    .setButtonAccessory(accessory);
+
+const head = (title, subtitle) => text(`## ${title}${subtitle ? `\n-# ${subtitle}` : ''}`);
+const state = (on) => (on ? 'Actif' : 'Inactif');
 
 const PAGES = [
   ['home', 'Accueil'],
   ['whitelist', 'Whitelist'],
   ['protections', 'Protections'],
   ['quarantine', 'Quarantaine'],
+  ['backup', 'Sauvegarde'],
   ['settings', 'Paramètres'],
 ];
 
-function navRow(active) {
-  return row(...PAGES.map(([id, label]) => button(`nav:${id}`, label, id === active ? ButtonStyle.Primary : ButtonStyle.Secondary)));
+function nav(active) {
+  return row(
+    new StringSelectMenuBuilder()
+      .setCustomId('nav:go')
+      .setPlaceholder('Aller à…')
+      .addOptions(PAGES.map(([value, label]) => ({ label, value, default: value === active }))),
+  );
 }
 
-const header = (title, subtitle) => text(`## ${title}\n-# ${subtitle}`);
+const fmtDate = (ms) =>
+  new Date(ms).toLocaleString('fr-FR', {
+    timeZone: process.env.TIMEZONE || 'UTC',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+const fmtSize = (bytes) => (bytes >= 1048576 ? `${(bytes / 1048576).toFixed(1)} Mo` : `${Math.max(1, Math.round(bytes / 1024))} Ko`);
+const fmtDuration = (ms) => {
+  const s = Math.floor(ms / 1000);
+  return s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`;
+};
+const summary = (st = {}) =>
+  `${st.roles ?? 0} rôles · ${st.categories ?? 0} catégories · ${st.channels ?? 0} salons · ${st.emojis ?? 0} emojis`;
 
 /* -------------------------------------------------------------------------- */
 /*  Pages                                                                     */
@@ -85,76 +119,62 @@ function diagnostics(guild, cfg) {
       issues.push('Le bot ne peut pas écrire dans le salon de logs');
     }
   }
-
-  return issues.length
-    ? `**Diagnostic**\n${issues.map((i) => `• ${i}`).join('\n')}`
-    : '**Diagnostic** — Configuration opérationnelle';
+  return issues;
 }
 
 function pageHome(c, guild, cfg) {
   const modules = Object.values(cfg.modules);
   const active = modules.filter((m) => m.enabled).length;
-  const raid = cfg.raid.active ? `**Actif** · fin <t:${Math.floor(cfg.raid.until / 1000)}:R>` : 'Inactif';
+  const quarantined = Object.keys(cfg.quarantined).length;
+  const last = backup.list(guild.id)[0];
+  const open = (page) => button(`nav:${page}`, 'Ouvrir');
 
-  const lines = [
-    `**Whitelist des bots** — ${cfg.whitelist.enabled ? 'Active' : 'Désactivée'} · ${Object.keys(cfg.whitelist.bots).length} bot(s)`,
-    `**Modules de protection** — ${active}/${modules.length} actifs`,
-    `**Mode raid** — ${raid}`,
-    `**Membres en quarantaine** — ${Object.keys(cfg.quarantined).length}`,
-    '',
-    `**Rôle de quarantaine** — ${cfg.quarantineRoleId ? `<@&${cfg.quarantineRoleId}>` : '`Non défini`'}`,
-    `**Salon de logs** — ${cfg.logChannelId ? `<#${cfg.logChannelId}>` : '`Non défini`'}`,
-  ];
-
-  c.addTextDisplayComponents(header('Anti-Raid', `${escapeMarkdown(guild.name)} · Panel de contrôle`))
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(lines.join('\n')))
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(diagnostics(guild, cfg)))
-    .addSeparatorComponents(divider())
-    .addActionRowComponents(
-      row(
-        button('raid:toggle', cfg.raid.active ? 'Désactiver le mode raid' : 'Activer le mode raid', cfg.raid.active ? ButtonStyle.Danger : ButtonStyle.Secondary),
-        button('panel:close', 'Fermer'),
+  c.addTextDisplayComponents(head('Anti-Raid', escapeMarkdown(guild.name)))
+    .addSeparatorComponents(rule())
+    .addSectionComponents(
+      line(
+        'Mode raid',
+        cfg.raid.active ? `Actif · fin <t:${Math.floor(cfg.raid.until / 1000)}:R>` : 'Inactif',
+        button('raid:toggle', cfg.raid.active ? 'Désactiver' : 'Activer', { danger: cfg.raid.active }),
       ),
+      line('Whitelist', `${state(cfg.whitelist.enabled)} · ${Object.keys(cfg.whitelist.bots).length} bot(s)`, open('whitelist')),
+      line('Protections', `${active} sur ${modules.length} actives`, open('protections')),
+      line('Quarantaine', quarantined ? `${quarantined} membre(s)` : 'Aucun membre', open('quarantine')),
+      line('Sauvegarde', last ? `Dernière : <t:${Math.floor(last.createdAt / 1000)}:R>` : 'Aucune sauvegarde', open('backup')),
     );
+
+  const issues = diagnostics(guild, cfg);
+  if (issues.length) {
+    c.addSeparatorComponents(rule()).addTextDisplayComponents(text(`-# À corriger\n${issues.map((i) => `-# • ${i}`).join('\n')}`));
+  }
 }
 
 function pageWhitelist(c, guild, cfg) {
   const entries = Object.entries(cfg.whitelist.bots);
-  const list = entries.slice(0, 20).map(([id, b]) => `• **${escapeMarkdown(b.name || 'Bot')}** · \`${id}\``);
-  if (entries.length > 20) list.push(`… et ${entries.length - 20} autre(s)`);
+  const list = entries.slice(0, 20).map(([id, b]) => `${escapeMarkdown(b.name || 'Bot')} · \`${id}\``);
+  if (entries.length > 20) list.push(`-# … et ${entries.length - 20} autre(s)`);
 
-  const body = [
-    `**Whitelist** — ${cfg.whitelist.enabled ? 'Active' : 'Désactivée'}`,
-    `**Sanction de l’ajouteur** — ${cfg.punishInviter ? 'Activée' : 'Désactivée'}`,
-    '',
-    `**Bots autorisés** (${entries.length})`,
-    list.length ? list.join('\n') : '`Aucun bot whitelisté.`',
-  ].join('\n');
-
-  c.addTextDisplayComponents(
-    header('Whitelist des bots', 'Tout bot absent de cette liste est expulsé dès son arrivée.'),
-  )
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(body))
-    .addSeparatorComponents(divider())
-    .addActionRowComponents(
-      row(
-        button('wl:add', 'Ajouter un bot', ButtonStyle.Primary),
-        button('wl:remove', 'Retirer un bot'),
-        button('wl:import', 'Importer les bots présents'),
+  c.addTextDisplayComponents(head('Whitelist', 'Tout bot absent de la liste est expulsé à son arrivée.'))
+    .addSeparatorComponents(rule())
+    .addSectionComponents(
+      line('Whitelist', state(cfg.whitelist.enabled), button('wl:toggle', cfg.whitelist.enabled ? 'Désactiver' : 'Activer')),
+      line(
+        'Sanction de l’ajouteur',
+        state(cfg.punishInviter),
+        button('wl:inviter', cfg.punishInviter ? 'Désactiver' : 'Activer'),
       ),
     )
+    .addSeparatorComponents(rule())
+    .addTextDisplayComponents(text(`Bots autorisés · ${entries.length}\n${list.length ? list.join('\n') : '-# Aucun bot.'}`))
     .addActionRowComponents(
-      row(toggle('wl:toggle', 'Whitelist', cfg.whitelist.enabled), toggle('wl:inviter', 'Sanction de l’ajouteur', cfg.punishInviter)),
+      row(button('wl:add', 'Ajouter'), button('wl:remove', 'Retirer'), button('wl:import', 'Importer les bots présents')),
     );
 }
 
 function pageProtections(c, cfg) {
   const lines = Object.entries(MODULES).map(([key, def]) => {
     const m = cfg.modules[key];
-    return `\`${m.enabled ? 'ON ' : 'OFF'}\` **${def.label}** · ${m.limit} ${def.unit} / ${m.window} s`;
+    return m.enabled ? `${def.label} · ${m.limit} ${def.unit} / ${m.window} s` : `-# ${def.label} · désactivé`;
   });
 
   const select = new StringSelectMenuBuilder()
@@ -166,17 +186,15 @@ function pageProtections(c, cfg) {
         return {
           label: def.label,
           value: key,
-          description: `${m.enabled ? 'Actif' : 'Inactif'} · ${m.limit} ${def.unit} en ${m.window} s`,
+          description: `${state(m.enabled)} · ${m.limit} ${def.unit} en ${m.window} s`,
         };
       }),
     );
 
-  c.addTextDisplayComponents(
-    header('Protections', 'Chaque dépassement de seuil met l’auteur en quarantaine.'),
-  )
-    .addSeparatorComponents(divider())
+  c.addTextDisplayComponents(head('Protections', 'Un dépassement de seuil met l’auteur en quarantaine.'))
+    .addSeparatorComponents(rule())
     .addTextDisplayComponents(text(lines.join('\n')))
-    .addSeparatorComponents(divider())
+    .addSeparatorComponents(rule())
     .addActionRowComponents(row(select))
     .addActionRowComponents(
       row(button('prot:all_on', 'Tout activer'), button('prot:all_off', 'Tout désactiver'), button('prot:reset', 'Valeurs par défaut')),
@@ -186,48 +204,35 @@ function pageProtections(c, cfg) {
 function pageModule(c, cfg, key) {
   const def = MODULES[key];
   const m = cfg.modules[key];
-  const lines = [
-    def.desc,
-    '',
-    `**Statut** — ${m.enabled ? 'Actif' : 'Inactif'}`,
-    `**Seuil** — ${m.limit} ${def.unit} en ${m.window} s`,
-  ];
-  if (key === 'joinFlood') lines.push(`**Durée du mode raid** — ${m.duration} min`);
-  lines.push('**Sanction** — Quarantaine automatique');
+  const threshold = `${m.limit} ${def.unit} en ${m.window} s${key === 'joinFlood' ? ` · mode raid ${m.duration} min` : ''}`;
 
-  c.addTextDisplayComponents(header(def.label, 'Module de protection'))
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(lines.join('\n')))
-    .addSeparatorComponents(divider())
-    .addActionRowComponents(
-      row(
-        toggle(`mod:toggle:${key}`, 'Module', m.enabled),
-        button(`mod:edit:${key}`, 'Modifier le seuil', ButtonStyle.Primary),
-        button('nav:protections:back', 'Retour'),
-      ),
-    );
+  c.addTextDisplayComponents(head(def.label, def.desc))
+    .addSeparatorComponents(rule())
+    .addSectionComponents(
+      line('Statut', state(m.enabled), button(`mod:toggle:${key}`, m.enabled ? 'Désactiver' : 'Activer')),
+      line('Seuil', threshold, button(`mod:edit:${key}`, 'Modifier')),
+    )
+    .addTextDisplayComponents(text('-# Sanction : quarantaine automatique'))
+    .addActionRowComponents(row(button('nav:protections', 'Retour')));
 }
 
 function pageQuarantine(c, cfg) {
   const entries = Object.entries(cfg.quarantined).sort((a, b) => b[1].at - a[1].at);
   const list = entries
     .slice(0, 10)
-    .map(([id, r]) => `• <@${id}> · ${escapeMarkdown(clip(r.reason || 'Sans motif', 80))} · <t:${Math.floor(r.at / 1000)}:R>`);
-  if (entries.length > 10) list.push(`… et ${entries.length - 10} autre(s)`);
+    .map(([id, r]) => `<@${id}> · ${escapeMarkdown(clip(r.reason || 'Sans motif', 80))} · <t:${Math.floor(r.at / 1000)}:R>`);
+  if (entries.length > 10) list.push(`-# … et ${entries.length - 10} autre(s)`);
 
-  c.addTextDisplayComponents(
-    header('Quarantaine', 'Rôles retirés et remplacés par le rôle de quarantaine.'),
-  )
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(list.length ? list.join('\n') : '`Aucun membre en quarantaine.`'))
-    .addSeparatorComponents(divider());
+  c.addTextDisplayComponents(head('Quarantaine', 'Rôles retirés et remplacés par le rôle de quarantaine.'))
+    .addSeparatorComponents(rule())
+    .addTextDisplayComponents(text(list.length ? list.join('\n') : '-# Aucun membre en quarantaine.'));
 
   if (entries.length) {
     c.addActionRowComponents(
       row(
         new StringSelectMenuBuilder()
           .setCustomId('q:release')
-          .setPlaceholder('Libérer un membre (restaure ses rôles)…')
+          .setPlaceholder('Libérer un membre…')
           .addOptions(
             entries.slice(0, 25).map(([id, r]) => ({
               label: clip(r.name || id, 100),
@@ -238,59 +243,193 @@ function pageQuarantine(c, cfg) {
       ),
     );
   }
-  c.addActionRowComponents(row(button('q:manual', 'Quarantaine manuelle')));
+  c.addSeparatorComponents(rule()).addSectionComponents(
+    line('Quarantaine manuelle', 'Par identifiant', button('q:manual', 'Mettre en quarantaine')),
+  );
 }
 
 function pageSettings(c, guild, cfg) {
   const exempt = Object.entries(cfg.exempt);
-  const exemptList = exempt.slice(0, 15).map(([id, e]) => `• **${escapeMarkdown(e.name || 'Inconnu')}** · \`${id}\``);
-  if (exempt.length > 15) exemptList.push(`… et ${exempt.length - 15} autre(s)`);
-
-  const body = [
-    `**Rôle de quarantaine** — ${cfg.quarantineRoleId ? `<@&${cfg.quarantineRoleId}>` : '`Non défini`'}`,
-    `**Salon de logs** — ${cfg.logChannelId ? `<#${cfg.logChannelId}>` : '`Non défini`'}`,
-    '',
-    `**Exemptions** (${exempt.length}) — ignorées par les protections automatiques`,
-    exemptList.length ? exemptList.join('\n') : '`Aucune exemption.`',
-  ].join('\n');
+  const exemptList = exempt.slice(0, 15).map(([id, e]) => `${escapeMarkdown(e.name || 'Inconnu')} · \`${id}\``);
+  if (exempt.length > 15) exemptList.push(`-# … et ${exempt.length - 15} autre(s)`);
 
   const roleSelect = new RoleSelectMenuBuilder()
     .setCustomId('set:role')
-    .setPlaceholder('Choisir le rôle de quarantaine')
+    .setPlaceholder('Rôle de quarantaine')
     .setMinValues(1)
     .setMaxValues(1);
   if (cfg.quarantineRoleId && guild.roles.cache.has(cfg.quarantineRoleId)) roleSelect.setDefaultRoles(cfg.quarantineRoleId);
 
   const channelSelect = new ChannelSelectMenuBuilder()
     .setCustomId('set:channel')
-    .setPlaceholder('Choisir le salon de logs')
+    .setPlaceholder('Salon de logs')
     .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
     .setMinValues(1)
     .setMaxValues(1);
   if (cfg.logChannelId && guild.channels.cache.has(cfg.logChannelId)) channelSelect.setDefaultChannels(cfg.logChannelId);
 
-  c.addTextDisplayComponents(header('Paramètres', 'Rôle de quarantaine, salon de logs et exemptions.'))
-    .addSeparatorComponents(divider())
-    .addTextDisplayComponents(text(body))
-    .addSeparatorComponents(divider())
+  c.addTextDisplayComponents(head('Paramètres', 'Rôle de quarantaine, salon de logs, exemptions.'))
+    .addSeparatorComponents(rule())
     .addActionRowComponents(row(roleSelect))
     .addActionRowComponents(row(channelSelect))
-    .addActionRowComponents(
-      row(
-        button('set:testlog', 'Tester les logs'),
-        button('ex:add', 'Ajouter une exemption'),
-        button('ex:remove', 'Retirer une exemption'),
+    .addSectionComponents(line('Logs', 'Envoyer un message de test', button('set:testlog', 'Tester')))
+    .addSeparatorComponents(rule())
+    .addTextDisplayComponents(
+      text(`Exemptions · ${exempt.length}\n-# Ignorées par les protections automatiques\n${exemptList.length ? exemptList.join('\n') : '-# Aucune.'}`),
+    )
+    .addActionRowComponents(row(button('ex:add', 'Ajouter'), button('ex:remove', 'Retirer')));
+}
+
+/* ------------------------------ Sauvegarde -------------------------------- */
+
+function pageBackup(c, guild) {
+  const list = backup.list(guild.id);
+
+  c.addTextDisplayComponents(head('Sauvegarde', 'Copie complète du serveur, restaurable après une attaque.'))
+    .addSeparatorComponents(rule())
+    .addSectionComponents(
+      line(
+        'Nouvelle sauvegarde',
+        'Rôles, salons, permissions, emojis, stickers, webhooks, AutoMod, événements, bans, rôles des membres',
+        button('bk:create', 'Créer'),
       ),
+    )
+    .addSeparatorComponents(rule());
+
+  if (!list.length) {
+    c.addTextDisplayComponents(text('-# Aucune sauvegarde pour le moment.'));
+    return;
+  }
+
+  c.addTextDisplayComponents(
+    text(list.map((e, i) => `${i + 1}. <t:${Math.floor(e.createdAt / 1000)}:f> · ${summary(e.stats)} · ${fmtSize(e.bytes)}`).join('\n')),
+  ).addActionRowComponents(
+    row(
+      new StringSelectMenuBuilder()
+        .setCustomId('bk:select')
+        .setPlaceholder('Choisir une sauvegarde…')
+        .addOptions(
+          list.map((e, i) => ({
+            label: `${i + 1}. ${fmtDate(e.createdAt)}`,
+            value: e.id,
+            description: clip(summary(e.stats), 100),
+          })),
+        ),
+    ),
+  );
+}
+
+function pageBackupDetail(c, guild, id) {
+  const entry = backup.get(guild.id, id);
+  if (!entry) return pageBackup(c, guild);
+  const opts = backup.getOptions(guild.id);
+  const st = entry.stats || {};
+
+  c.addTextDisplayComponents(
+    head('Sauvegarde', `<t:${Math.floor(entry.createdAt / 1000)}:f> · ${fmtSize(entry.bytes)}${entry.imported ? ' · importée' : ''}`),
+  )
+    .addTextDisplayComponents(
+      text(
+        `${summary(st)}\n-# ${st.stickers ?? 0} stickers · ${st.webhooks ?? 0} webhooks · ${st.automod ?? 0} règles AutoMod · ${st.events ?? 0} événements · ${st.bans ?? 0} bans · ${st.members ?? 0} membres`,
+      ),
+    )
+    .addSeparatorComponents(rule())
+    .addSectionComponents(
+      line(
+        'Restaurer · ajouter ce qui manque',
+        'Crée les rôles, salons et éléments absents. Ne supprime rien et ne modifie pas l’existant.',
+        button(`bk:merge:${id}`, 'Restaurer'),
+      ),
+      line(
+        'Restaurer · tout reconstruire',
+        'Supprime les salons et rôles actuels, puis recrée le serveur à l’identique.',
+        button(`bk:wipe:${id}`, 'Reconstruire', { danger: true }),
+      ),
+    )
+    .addSeparatorComponents(rule())
+    .addSectionComponents(
+      line(
+        'Débannir les bannis récents',
+        opts.unban ? 'Oui · les bans absents de la sauvegarde seront levés' : 'Non · seuls les bans manquants sont rétablis',
+        button(`bk:unban:${id}`, opts.unban ? 'Désactiver' : 'Activer'),
+      ),
+      line('Exporter', 'Fichier .json.gz à conserver hors du serveur', button(`bk:export:${id}`, 'Exporter')),
+      line('Supprimer', 'Retire cette sauvegarde du stockage', button(`bk:delete:${id}`, 'Supprimer')),
+    )
+    .addActionRowComponents(row(button('nav:backup', 'Retour')));
+}
+
+const STAT_LABELS = {
+  roles: 'Rôles',
+  channels: 'Salons',
+  emojis: 'Emojis',
+  stickers: 'Stickers',
+  webhooks: 'Webhooks',
+  automod: 'AutoMod',
+  events: 'Événements',
+  bans: 'Bans',
+  members: 'Membres',
+};
+
+function pageJob(c, job) {
+  const title = job.kind === 'create' ? 'Création de la sauvegarde' : 'Restauration';
+  const elapsed = fmtDuration(Date.now() - job.startedAt);
+
+  if (!job.finished) {
+    const label = job.labels[job.index] || '…';
+    const progress = job.total ? ` · ${job.done} / ${job.total}` : '';
+    c.addTextDisplayComponents(head(title, `En cours · ${elapsed}`))
+      .addSeparatorComponents(rule())
+      .addTextDisplayComponents(text(`Étape ${job.index + 1} sur ${job.labels.length}\n${label}${progress}`))
+      .addTextDisplayComponents(text('-# Ne modifie pas le serveur pendant l’opération.'));
+    return;
+  }
+
+  if (!job.ok) {
+    c.addTextDisplayComponents(head(title, 'Échec'))
+      .addSeparatorComponents(rule())
+      .addTextDisplayComponents(text(clip(job.error || 'Erreur inconnue.', 1500)))
+      .addActionRowComponents(row(button('bk:dismiss', 'Fermer')));
+    return;
+  }
+
+  const report = job.report || {};
+  const stats = report.stats || {};
+  const lines = Object.entries(STAT_LABELS)
+    .filter(([key]) => stats[key] && (stats[key].created || stats[key].existing || stats[key].failed))
+    .map(([key, label]) => {
+      const s = stats[key];
+      return `${label} · ${s.created} créé(s) · ${s.existing} existant(s)${s.failed ? ` · ${s.failed} échec(s)` : ''}`;
+    });
+  const warnings = (report.warnings || []).slice(0, 8).map((w) => `-# • ${clip(w, 180)}`);
+  const hidden = (report.warnings?.length || 0) - warnings.length + (report.omitted || 0);
+
+  c.addTextDisplayComponents(head(title, `Terminée · ${elapsed}`)).addSeparatorComponents(rule());
+  c.addTextDisplayComponents(text(lines.length ? lines.join('\n') : '-# Aucun changement nécessaire.'));
+  if (warnings.length) {
+    c.addSeparatorComponents(rule()).addTextDisplayComponents(
+      text(`-# Avertissements\n${warnings.join('\n')}${hidden > 0 ? `\n-# … et ${hidden} autre(s)` : ''}`),
     );
+  }
+  if (job.mode === 'wipe') {
+    c.addTextDisplayComponents(text('-# Ce salon a été conservé pour afficher le rapport : tu peux le supprimer ensuite.'));
+  }
+  c.addActionRowComponents(row(button('bk:dismiss', 'Terminer')));
 }
 
 /** Construit le message complet du panel pour une page donnée. */
 function build(guild, page = 'home') {
   const [name, arg] = String(page).split(':');
   const cfg = store.guild(guild.id);
-  const c = new ContainerBuilder().setAccentColor(COLORS.panel);
-  let active = name;
+  const c = new ContainerBuilder();
 
+  const job = backup.getJob(guild.id);
+  if (job) {
+    pageJob(c, job);
+    return { components: [c], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
+  }
+
+  let active = name;
   switch (name) {
     case 'whitelist':
       pageWhitelist(c, guild, cfg);
@@ -306,6 +445,10 @@ function build(guild, page = 'home') {
     case 'quarantine':
       pageQuarantine(c, cfg);
       break;
+    case 'backup':
+      if (arg) pageBackupDetail(c, guild, arg);
+      else pageBackup(c, guild);
+      break;
     case 'settings':
       pageSettings(c, guild, cfg);
       break;
@@ -314,7 +457,8 @@ function build(guild, page = 'home') {
       pageHome(c, guild, cfg);
   }
 
-  c.addSeparatorComponents(divider()).addActionRowComponents(navRow(active));
+  c.addSeparatorComponents(gap()).addActionRowComponents(nav(active));
+  if (active === 'home') c.addActionRowComponents(row(button('panel:close', 'Fermer')));
 
   return { components: [c], flags: MessageFlags.IsComponentsV2, allowedMentions: { parse: [] } };
 }
@@ -357,6 +501,13 @@ function thresholdModal(key, cfg) {
   return modal;
 }
 
+const WIPE_WORD = 'RECONSTRUIRE';
+const wipeModal = (id) =>
+  new ModalBuilder()
+    .setCustomId(`bk:wipe_modal:${id}`)
+    .setTitle('Tout reconstruire')
+    .addComponents(input('confirm', `Tape ${WIPE_WORD} pour confirmer`, { placeholder: WIPE_WORD, min: 1, max: 20 }));
+
 /* -------------------------------------------------------------------------- */
 /*  Interactions                                                              */
 /* -------------------------------------------------------------------------- */
@@ -376,6 +527,25 @@ const parseIntIn = (raw, min, max) => {
   return Number.isInteger(n) && n >= min && n <= max ? n : null;
 };
 
+/** Limite la fréquence des mises à jour du message pendant une longue tâche. */
+function throttle(fn, ms) {
+  let last = 0;
+  let timer = null;
+  return () => {
+    const wait = ms - (Date.now() - last);
+    if (wait <= 0) {
+      last = Date.now();
+      fn();
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        timer = null;
+        last = Date.now();
+        fn();
+      }, wait);
+    }
+  };
+}
+
 async function handleInteraction(interaction) {
   const relevant = interaction.isButton() || interaction.isAnySelectMenu() || interaction.isModalSubmit();
   if (!relevant || !interaction.guild) return;
@@ -393,7 +563,8 @@ async function handleInteraction(interaction) {
   try {
     // Navigation (mise à jour immédiate)
     if (ns === 'nav') {
-      await interaction.update(build(guild, action));
+      const target = interaction.isAnySelectMenu() ? interaction.values[0] : action;
+      await interaction.update(build(guild, target));
       return;
     }
 
@@ -408,6 +579,7 @@ async function handleInteraction(interaction) {
       else if (key === 'ex:add') modal = idModal('ex:add_modal', 'Ajouter une exemption', 'Identifiant (ID) du membre ou bot');
       else if (key === 'ex:remove') modal = idModal('ex:remove_modal', 'Retirer une exemption', 'Identifiant (ID) à retirer');
       else if (key === 'mod:edit' && MODULES[arg]) modal = thresholdModal(arg, cfg);
+      else if (key === 'bk:wipe' && backup.get(guild.id, arg) && !backup.isBusy(guild.id)) modal = wipeModal(arg);
       if (modal) {
         await interaction.showModal(modal);
         return;
@@ -417,7 +589,14 @@ async function handleInteraction(interaction) {
     await interaction.deferUpdate();
     const cfg = store.guild(guild.id);
     const notify = (content) => interaction.followUp({ content, flags: MessageFlags.Ephemeral }).catch(() => {});
+    const refresh = (p) => interaction.message?.edit(build(guild, p)).catch(() => {});
     let page = 'home';
+
+    /** Lance une tâche longue en rafraîchissant le message toutes les 3 s. */
+    const runJob = async (fn) => {
+      const onChange = throttle(() => refresh('backup'), 3000);
+      return fn(onChange);
+    };
 
     switch (`${ns}:${action}`) {
       case 'panel:close':
@@ -570,6 +749,84 @@ async function handleInteraction(interaction) {
         break;
       }
 
+      /* ------------------------------- Sauvegarde ---------------------------- */
+      case 'bk:select':
+        page = backup.get(guild.id, interaction.values[0]) ? `backup:${interaction.values[0]}` : 'backup';
+        break;
+
+      case 'bk:dismiss':
+        backup.dismissJob(guild.id);
+        page = 'backup';
+        break;
+
+      case 'bk:unban':
+        backup.setOption(guild.id, 'unban', !backup.getOptions(guild.id).unban);
+        page = `backup:${arg}`;
+        break;
+
+      case 'bk:delete':
+        await backup.remove(guild.id, arg);
+        configLog(guild, 'Sauvegarde supprimée');
+        page = 'backup';
+        break;
+
+      case 'bk:export': {
+        page = `backup:${arg}`;
+        const raw = await backup.readRaw(guild.id, arg);
+        if (!raw) return void notify('Sauvegarde introuvable.');
+        const stamp = new Date(Number(arg)).toISOString().slice(0, 10);
+        await interaction
+          .followUp({
+            content: 'Garde ce fichier en lieu sûr : il contient la structure complète du serveur.',
+            files: [{ attachment: raw, name: `sauvegarde-${guild.id}-${stamp}.json.gz` }],
+            flags: MessageFlags.Ephemeral,
+          })
+          .catch((err) => notify(`Envoi du fichier impossible : ${err.message}`));
+        break;
+      }
+
+      case 'bk:create': {
+        page = 'backup';
+        if (backup.isBusy(guild.id)) return void notify('Une opération est déjà en cours.');
+        try {
+          await runJob(async (onChange) => {
+            const p = backup.createBackup(guild, { by: interaction.user.id, onChange });
+            refresh('backup');
+            await p;
+          });
+          backup.dismissJob(guild.id);
+          notify('Sauvegarde créée.');
+        } catch (err) {
+          backup.dismissJob(guild.id);
+          notify(`Sauvegarde impossible : ${err.message}`);
+        }
+        break;
+      }
+
+      case 'bk:merge':
+      case 'bk:wipe_modal': {
+        page = 'backup';
+        const wipe = action === 'wipe_modal';
+        if (wipe && interaction.fields.getTextInputValue('confirm').trim() !== WIPE_WORD) {
+          return void notify('Confirmation incorrecte : rien n’a été modifié.');
+        }
+        if (!backup.get(guild.id, arg)) return void notify('Sauvegarde introuvable.');
+        if (backup.isBusy(guild.id)) return void notify('Une opération est déjà en cours.');
+        await runJob(async (onChange) => {
+          const p = backup
+            .restore(guild, arg, {
+              mode: wipe ? 'wipe' : 'merge',
+              keepChannelId: interaction.channelId,
+              by: interaction.user.id,
+              onChange,
+            })
+            .catch(() => null);
+          refresh('backup');
+          await p;
+        });
+        break; // le rapport reste affiché jusqu'à « Terminer »
+      }
+
       /* ------------------------------ Paramètres ----------------------------- */
       case 'set:role': {
         page = 'settings';
@@ -633,7 +890,8 @@ async function handleInteraction(interaction) {
         page = 'home';
     }
 
-    await interaction.editReply(build(guild, page));
+    const payload = build(guild, page);
+    await interaction.editReply(payload).catch(() => interaction.message?.edit(payload).catch(() => {}));
   } catch (err) {
     console.error('[panel] Erreur d’interaction :', err);
     const payload = { content: 'Une erreur est survenue. Réessaie dans un instant.', flags: MessageFlags.Ephemeral };

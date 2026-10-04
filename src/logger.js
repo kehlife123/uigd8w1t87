@@ -16,7 +16,7 @@ const clip = (str, max) => {
 };
 
 /**
- * Envoie un log (Components V2) dans le salon configuré.
+ * Envoie un log (Components V2, sobre) dans le salon configuré.
  * Retourne true si le message a bien été envoyé.
  */
 async function sendLog(guild, { title, color = COLORS.info, description, fields = [] }) {
@@ -29,21 +29,19 @@ async function sendLog(guild, { title, color = COLORS.info, description, fields 
       (await guild.channels.fetch(cfg.logChannelId).catch(() => null));
     if (!channel || !channel.isTextBased()) return false;
 
-    const container = new ContainerBuilder()
-      .setAccentColor(color)
-      .addTextDisplayComponents(
-        new TextDisplayBuilder().setContent(`### ${clip(title, 200)}${description ? `\n${clip(description, 800)}` : ''}`),
-      );
+    const container = new ContainerBuilder().setAccentColor(color);
+    const head = `**${clip(title, 200)}**${description ? `\n${clip(description, 800)}` : ''}`;
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(head));
 
     if (fields.length) {
-      const body = fields.map(([label, value]) => `**${label}** — ${clip(value, 600)}`).join('\n');
+      const body = fields.map(([label, value]) => `-# ${label}\n${clip(value, 600)}`).join('\n');
       container
-        .addSeparatorComponents(new SeparatorBuilder().setDivider(true).setSpacing(SeparatorSpacingSize.Small))
-        .addTextDisplayComponents(new TextDisplayBuilder().setContent(clip(body, 3000)));
+        .addSeparatorComponents(new SeparatorBuilder().setDivider(false).setSpacing(SeparatorSpacingSize.Small))
+        .addTextDisplayComponents(new TextDisplayBuilder().setContent(clip(body, 3500)));
     }
 
     container.addTextDisplayComponents(
-      new TextDisplayBuilder().setContent(`-# <t:${Math.floor(Date.now() / 1000)}:F>`),
+      new TextDisplayBuilder().setContent(`-# <t:${Math.floor(Date.now() / 1000)}:f>`),
     );
 
     await channel.send({

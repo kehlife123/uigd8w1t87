@@ -2,9 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { MODULES } = require('./constants');
-
-const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const { MODULES, DATA_DIR } = require('./constants');
 const FILE = path.join(DATA_DIR, 'antiraid.json');
 
 let db = { guilds: {} };

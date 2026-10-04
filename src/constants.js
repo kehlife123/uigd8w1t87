@@ -1,13 +1,20 @@
 'use strict';
 
+const path = require('path');
 const { PermissionFlagsBits: P } = require('discord.js');
 
+// Dossier de données : volume Railway si présent, sinon ./data
+const DATA_DIR =
+  process.env.DATA_DIR || process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '..', 'data');
+
+// Interface volontairement monochrome : une seule teinte neutre partout.
+const NEUTRAL = 0x2b2d31;
 const COLORS = {
-  panel: 0x4e5058,
-  info: 0x4e5058,
-  alert: 0xed4245,
-  warn: 0xf0b232,
-  success: 0x3ba55d,
+  panel: NEUTRAL,
+  info: NEUTRAL,
+  alert: NEUTRAL,
+  warn: NEUTRAL,
+  success: NEUTRAL,
 };
 
 // Permissions considérées comme sensibles (octroi = activité suspecte).
@@ -128,4 +135,4 @@ const ID_RE = /^\d{17,20}$/;
 const getOwnerId = () => process.env.OWNER_ID;
 const getPrefix = () => process.env.PREFIX || '=';
 
-module.exports = { COLORS, DANGEROUS_MASK, MODULES, MASS_MENTION_MIN, ID_RE, getOwnerId, getPrefix };
+module.exports = { DATA_DIR, COLORS, DANGEROUS_MASK, MODULES, MASS_MENTION_MIN, ID_RE, getOwnerId, getPrefix };

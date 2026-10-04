@@ -3,6 +3,7 @@
 const { ActivityType, Client, Events, GatewayIntentBits } = require('discord.js');
 const store = require('./store');
 const panel = require('./panel');
+const backup = require('./backup');
 const protection = require('./protection');
 const { getOwnerId, getPrefix } = require('./constants');
 
@@ -62,6 +63,29 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
+    // =import + fichier joint : importe une sauvegarde exportée (owner uniquement)
+    const isImport = message.content.trim().toLowerCase() === `${getPrefix()}import`;
+    if (isImport && !message.author.bot && message.author.id === getOwnerId()) {
+      const file = message.attachments.first();
+      if (!file) {
+        await message.reply({ content: 'Joins le fichier .json.gz exporté au message.', allowedMentions: { parse: [] } });
+        return;
+      }
+      try {
+        const res = await fetch(file.url, { signal: AbortSignal.timeout(30_000) });
+        if (!res.ok) throw new Error(`téléchargement impossible (${res.status})`);
+        const entry = await backup.importBuffer(message.guild.id, Buffer.from(await res.arrayBuffer()));
+        await message.reply({
+          content: `Sauvegarde importée (${new Date(entry.createdAt).toISOString().slice(0, 10)}). Ouvre le panel > Sauvegarde pour la restaurer.`,
+          allowedMentions: { parse: [] },
+        });
+        await message.delete().catch(() => {});
+      } catch (err) {
+        await message.reply({ content: `Import impossible : ${err.message}`, allowedMentions: { parse: [] } });
+      }
+      return;
+    }
+
     await protection.handleMessage(message);
   } catch (err) {
     console.error('[message] Erreur :', err);
@@ -81,6 +105,7 @@ async function start() {
     throw new Error('La variable OWNER_ID est manquante ou invalide (ID Discord de l’owner).');
   }
   store.load();
+  backup.init();
   await client.login(token);
 }
 
